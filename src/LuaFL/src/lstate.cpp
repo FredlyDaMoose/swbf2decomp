@@ -1,0 +1,209 @@
+#include <stdlib.h>
+
+#define lstate_c
+
+#include "lua.h"
+
+#include "ldebug.h"
+#include "ldo.h"
+#include "lfunc.h"
+#include "lgc.h"
+#include "llex.h"
+#include "lmem.h"
+#include "lstate.h"
+#include "lstring.h"
+#include "ltable.h"
+#include "ltm.h"
+
+#include "Battlefront2/Source/LuaMemory.h"
+
+#ifndef LUA_USERSTATE
+#define EXTRASPACE	0
+#else
+union UEXTRASPACE {L_Umaxalign a; LUA_USERSTATE b;};
+#define EXTRASPACE (sizeof(union UEXTRASPACE))
+#endif
+
+// LIBRARY: SWBF2 0x0069f620
+// default_panic
+static int default_panic (lua_State *L) {
+  LuaScript_CallWARNINGF(lua_tostring(L, -1));
+  return 0;
+}
+
+// LIBRARY: SWBF2 0x0069f8c0
+// mallocstate
+static lua_State *mallocstate (lua_State *L) {
+  lu_byte *block = (lu_byte *)luaM_malloc(L, sizeof(lua_State) + EXTRASPACE);
+  if (block == NULL) return NULL;
+  else {
+    block += EXTRASPACE;
+    return cast(lua_State *, block);
+  }
+}
+
+// LIBRARY: SWBF2 0x0069f7c0
+// freestate
+static void freestate (lua_State *L, lua_State *L1) {
+  luaM_free(L, cast(lu_byte *, L1) - EXTRASPACE,
+               sizeof(lua_State) + EXTRASPACE);
+}
+
+// LIBRARY: SWBF2 0x0069f940
+// stack_init
+static void stack_init (lua_State *L1, lua_State *L) {
+  L1->stack = luaM_newvector(L, BASIC_STACK_SIZE + EXTRA_STACK, TObject);
+  L1->stacksize = BASIC_STACK_SIZE + EXTRA_STACK;
+  L1->top = L1->stack;
+  L1->stack_last = L1->stack+(L1->stacksize - EXTRA_STACK)-1;
+  L1->base_ci = luaM_newvector(L, BASIC_CI_SIZE, CallInfo);
+  L1->ci = L1->base_ci;
+  L1->ci->state = CI_C;
+  setnilvalue(L1->top++);
+  L1->base = L1->ci->base = L1->top;
+  L1->ci->top = L1->top + LUA_MINSTACK;
+  L1->size_ci = BASIC_CI_SIZE;
+  L1->end_ci = L1->base_ci + L1->size_ci;
+}
+
+// LIBRARY: SWBF2 0x0069f780
+// freestack
+static void freestack (lua_State *L, lua_State *L1) {
+  luaM_freearray(L, L1->base_ci, L1->size_ci, CallInfo);
+  luaM_freearray(L, L1->stack, L1->stacksize, TObject);
+}
+
+// LIBRARY: SWBF2 0x0069f640
+// f_luaopen
+static void f_luaopen (lua_State *L, void *ud) {
+
+  global_State *g = luaM_new(NULL, global_State);
+  UNUSED(ud);
+  if (g == NULL) luaD_throw(L, LUA_ERRMEM);
+  L->l_G = g;
+  g->mainthread = L;
+  g->GCthreshold = 0;
+  g->strt.size = 0;
+  g->strt.nuse = 0;
+  g->strt.hash = NULL;
+  setnilvalue(defaultmeta(L));
+  setnilvalue(registry(L));
+  luaZ_initbuffer(L, &g->buff);
+  g->panic = default_panic;
+  g->rootgc = NULL;
+  g->rootudata = NULL;
+  g->tmudata = NULL;
+  setnilvalue(gkey(g->dummynode));
+  setnilvalue(gval(g->dummynode));
+  g->dummynode->next = NULL;
+  g->nblocks = sizeof(lua_State) + sizeof(global_State);
+  stack_init(L, L);
+
+  defaultmeta(L)->tt = LUA_TTABLE;
+  sethvalue(defaultmeta(L), luaH_new(L, 0, 0));
+  hvalue(defaultmeta(L))->metatable = hvalue(defaultmeta(L));
+  sethvalue(gt(L), luaH_new(L, 0, 4));
+  sethvalue(registry(L), luaH_new(L, 4, 4));
+  luaS_resize(L, MINSTRTABSIZE);
+  luaT_init(L);
+  luaX_init(L);
+  luaS_fix(luaS_newliteral(L, MEMERRMSG));
+  g->GCthreshold = 4*G(L)->nblocks;
+}
+
+// LIBRARY: SWBF2 0x0069f8e0
+// preinit_state
+static void preinit_state (lua_State *L) {
+  L->stack = NULL;
+  L->stacksize = 0;
+  L->errorJmp = NULL;
+  L->hook = NULL;
+  L->hookmask = L->hookinit = 0;
+  L->basehookcount = 0;
+  L->allowhook = 1;
+  resethookcount(L);
+  L->openupval = NULL;
+  L->size_ci = 0;
+  L->nCcalls = 0;
+  L->base_ci = L->ci = NULL;
+  L->errfunc = 0;
+  setnilvalue(gt(L));
+}
+
+// LIBRARY: SWBF2 0x0069f5a0
+// close_state
+static void close_state (lua_State *L) {
+  luaF_close(L, L->stack);
+  if (G(L)) {
+    luaC_sweep(L, 1);
+    lua_assert(G(L)->rootgc == NULL);
+    lua_assert(G(L)->rootudata == NULL);
+    luaS_freeall(L);
+    luaZ_freebuffer(L, &G(L)->buff);
+  }
+  freestack(L, L);
+  if (G(L)) {
+    lua_assert(G(L)->nblocks == sizeof(lua_State) + sizeof(global_State));
+    luaM_freelem(NULL, G(L));
+  }
+  freestate(NULL, L);
+}
+
+// FUNCTION: SWBF2 0x0069f810
+lua_State *luaE_newthread (lua_State *L) {
+  lua_State *L1 = mallocstate(L);
+  luaC_link(L, valtogco(L1), LUA_TTHREAD);
+  preinit_state(L1);
+  L1->l_G = L->l_G;
+  stack_init(L1, L);
+  setobj2n(gt(L1), gt(L));
+  return L1;
+}
+
+// FUNCTION: SWBF2 0x0069f7e0
+void luaE_freethread (lua_State *L, lua_State *L1) {
+  luaF_close(L1, L1->stack);
+  lua_assert(L1->openupval == NULL);
+  freestack(L, L1);
+  freestate(L, L1);
+}
+
+// LIBRARY: SWBF2 0x0069f860
+// lua_open
+LUA_API lua_State *lua_open (void) {
+  lua_State *L = mallocstate(NULL);
+  if (L) {
+    L->tt = LUA_TTHREAD;
+    L->marked = 0;
+    L->next = L->gclist = NULL;
+    preinit_state(L);
+    L->l_G = NULL;
+    if (luaD_rawrunprotected(L, f_luaopen, NULL) != 0) {
+
+      close_state(L);
+      L = NULL;
+    }
+  }
+  lua_userstateopen(L);
+  return L;
+}
+
+static void callallgcTM (lua_State *L, void *ud) {
+  UNUSED(ud);
+  luaC_callGCTM(L);
+}
+
+LUA_API void lua_close (lua_State *L) {
+  lua_lock(L);
+  L = G(L)->mainthread;
+  luaF_close(L, L->stack);
+  luaC_separateudata(L);
+  L->errfunc = 0;
+  do {
+    L->ci = L->base_ci;
+    L->base = L->top = L->ci->base;
+    L->nCcalls = 0;
+  } while (luaD_rawrunprotected(L, callallgcTM, NULL) != 0);
+  lua_assert(G(L)->tmudata == NULL);
+  close_state(L);
+}

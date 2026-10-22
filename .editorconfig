@@ -1,0 +1,31 @@
+# https://editorconfig.org
+root = true
+
+[*]
+charset = utf-8
+end_of_line = crlf
+indent_style = space
+indent_size = 4
+tab_width = 4
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[.git*]
+end_of_line = lf
+
+[*.sln]
+charset = utf-8-bom
+indent_style = tab
+
+[*.{vcxproj,vcxproj.filters}]
+indent_size = 2
+
+[*.{lib,ico}]
+charset = unset
+end_of_line = unset
+insert_final_newline = unset
+trim_trailing_whitespace = unset
+
+# Vendor code keeps its upstream layout.
+[src/{LuaFL,ZlibFL}/**]
+indent_size = 2
